@@ -7,4 +7,4 @@ plotly==6.6.0
 requests==2.33.1
 urllib3==2.6.3
 lxml==6.0.2
-watchdog
+certifi>=2024.2.2

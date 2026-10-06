@@ -11,7 +11,6 @@ import meteostat as ms
 import pandas as pd
 import requests
 import streamlit as st
-import urllib3
 
 REQUEST_TIMEOUT_SECONDS = 30
 MAX_RETRIES = 3
@@ -74,50 +73,37 @@ def load_stations() -> Dict[str, Dict[str, Any]]:
     return cleaned_stations
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_daily_dataframe(station_id: str, start, end):
-    if hasattr(ms, "Daily"):
-        return ms.Daily(station_id, start, end).fetch()
-
-    if hasattr(ms, "daily"):
-        ts = ms.daily(station_id, start, end)
-        if hasattr(ts, "fetch"):
-            return ts.fetch()
-        return ts
-
-    raise AttributeError("Meteostat API ไม่รองรับ Daily/daily ในสภาพแวดล้อมนี้")
+class EmptyStationData(Exception):
+    """Meteostat had no rows for the station and range."""
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def find_nearest_station_id(lat: float, lon: float):
-    if hasattr(ms, "Stations"):
-        nearby = ms.Stations().nearby(lat, lon).fetch(1)
-        if not nearby.empty:
-            return nearby.index[0]
-        return None
+# Raising on empty keeps empty answers out of the cache, so a later run asks Meteostat again.
+@st.cache_data(ttl=86400, max_entries=1024, show_spinner=False)
+def fetch_daily_dataframe(station_id: str, start, end) -> pd.DataFrame:
+    df = ms.daily(station_id, start, end).fetch()
+    if df is None or df.empty:
+        raise EmptyStationData(station_id)
+    return df
 
-    if hasattr(ms, "stations"):
-        if not hasattr(ms, "Point"):
-            raise AttributeError("Meteostat API ไม่มี Point สำหรับค้นหาสถานีใกล้เคียง")
 
-        point = ms.Point(lat, lon)
-        nearby = ms.stations.nearby(point, limit=1)
-
-        if hasattr(nearby, "fetch"):
-            nearby = nearby.fetch(1)
-
-        if nearby is not None and not nearby.empty:
-            return nearby.index[0]
-        return None
-
-    raise AttributeError("Meteostat API ไม่รองรับ Stations/stations ในสภาพแวดล้อมนี้")
+@st.cache_data(ttl=86400, max_entries=1024, show_spinner=False)
+def find_fallback_station(station_id: str, lat: float, lon: float):
+    """Nearest Meteostat station within 50 km that is not the station itself."""
+    nearby = ms.stations.nearby(ms.Point(lat, lon), limit=5)
+    for nearby_id, row in nearby.iterrows():
+        if str(nearby_id) != station_id:
+            return {
+                "id": str(nearby_id),
+                "name": str(row["name"]),
+                "lat": float(row["latitude"]),
+                "lon": float(row["longitude"]),
+            }
+    return None
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def fetch_oni_data() -> pd.DataFrame:
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    response = requests.get(ONI_SOURCE_URL, verify=False, timeout=REQUEST_TIMEOUT_SECONDS)
+    response = requests.get(ONI_SOURCE_URL, timeout=REQUEST_TIMEOUT_SECONDS)
     response.raise_for_status()
 
     dfs = pd.read_html(io.StringIO(response.text))
@@ -168,82 +154,65 @@ def fetch_oni_data() -> pd.DataFrame:
     return result
 
 
-def fetch_station_with_retry(wmo_id: str, info: Dict[str, Any], start_date, query_end_date) -> Dict[str, Any]:
-    station_df = pd.DataFrame()
-    station_source = "wmo"
-    station_reason = ""
-    station_attempt_logs = []
-
+def _fetch_with_retry(station_id: str, start_date, query_end_date, logs: list, label: str):
+    """Returns (dataframe or None, reason). Network errors are retried; an empty answer is final."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            station_df = fetch_daily_dataframe(wmo_id, start_date, query_end_date)
-            if station_df is not None and not station_df.empty:
-                station_reason = "success"
-                break
-            station_reason = "empty"
-            station_attempt_logs.append(f"WMO attempt {attempt}: empty")
+            return fetch_daily_dataframe(station_id, start_date, query_end_date), "success"
+        except EmptyStationData:
+            logs.append(f"{label} {station_id}: empty")
+            return None, "empty"
         except Exception as e:
-            station_reason = "exception"
-            station_attempt_logs.append(f"WMO attempt {attempt}: {type(e).__name__}: {str(e)}")
-
+            logs.append(f"{label} {station_id} attempt {attempt}: {type(e).__name__}: {e}")
         if attempt < MAX_RETRIES:
             time.sleep(BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+    return None, "exception"
 
-    if station_df is None or station_df.empty:
+
+def fetch_station_with_retry(wmo_id: str, info: Dict[str, Any], start_date, query_end_date) -> Dict[str, Any]:
+    logs: list = []
+    station_df, station_reason = _fetch_with_retry(wmo_id, start_date, query_end_date, logs, "WMO")
+    source = {"id": wmo_id, "name": info["name"], "lat": info["lat"], "lon": info["lon"]}
+    station_source = "wmo"
+
+    if station_df is None:
         try:
-            fallback_station_id = find_nearest_station_id(info["lat"], info["lon"])
-            if fallback_station_id is not None:
-                for attempt in range(1, MAX_RETRIES + 1):
-                    try:
-                        station_df = fetch_daily_dataframe(fallback_station_id, start_date, query_end_date)
-                        if station_df is not None and not station_df.empty:
-                            station_source = "fallback"
-                            station_reason = "success"
-                            station_attempt_logs.append(
-                                f"Fallback station {fallback_station_id} success on attempt {attempt}"
-                            )
-                            break
-                        station_reason = "empty"
-                        station_attempt_logs.append(
-                            f"Fallback station {fallback_station_id} attempt {attempt}: empty"
-                        )
-                    except Exception as e:
-                        station_reason = "exception"
-                        station_attempt_logs.append(
-                            f"Fallback station {fallback_station_id} attempt {attempt}: {type(e).__name__}: {str(e)}"
-                        )
-
-                    if attempt < MAX_RETRIES:
-                        time.sleep(BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
-            else:
-                station_reason = "empty"
-                station_attempt_logs.append("Fallback lookup: no nearby station returned by Meteostat")
+            fallback = find_fallback_station(wmo_id, info["lat"], info["lon"])
         except Exception as e:
-            station_reason = "exception"
-            station_attempt_logs.append(f"Fallback lookup failed: {type(e).__name__}: {str(e)}")
+            fallback = None
+            logs.append(f"Fallback lookup failed: {type(e).__name__}: {e}")
+        if fallback is None:
+            logs.append("Fallback lookup: no other station within 50 km")
+        else:
+            station_df, station_reason = _fetch_with_retry(fallback["id"], start_date, query_end_date, logs, "Fallback")
+            if station_df is not None:
+                source, station_source = fallback, "fallback"
 
-    if station_df is not None and not station_df.empty:
+    if station_df is not None:
         station_df = station_df.copy()
         station_df["wmo_id"] = wmo_id
+        station_df["source_id"] = source["id"]
         station_df["source"] = station_source
 
-        thai_source = "สถานีหลัก" if station_source == "wmo" else "สถานีใกล้เคียง (Fallback)"
-        thai_detail = (
-            "ดึงข้อมูลจากสถานีหลักสำเร็จ"
-            if station_source == "wmo"
-            else "สถานีหลักไม่มีข้อมูลหรือขัดข้อง จึงดึงทดแทนจากสถานีใกล้เคียง"
-        )
+        if station_source == "wmo":
+            thai_source = "สถานีหลัก"
+            thai_detail = "ดึงข้อมูลจากสถานีหลักสำเร็จ"
+        else:
+            thai_source = "สถานีใกล้เคียง (Fallback)"
+            thai_detail = f"สถานีหลักไม่มีข้อมูล จึงใช้ข้อมูลจาก {source['name']} ({source['id']}) แทน"
 
         return {
             "ok": True,
             "weather_df": station_df,
+            "source_id": source["id"],
             "fetched_station": {
                 "ชื่อสถานี": info["name"],
                 "ที่อยู่": info["address"],
                 "ภูมิภาค": info["region"],
-                "ละติจูด": info["lat"],
-                "ลองจิจูด": info["lon"],
-                "รหัสสถานี (WMO)": wmo_id,
+                # The map shows where the data really comes from.
+                "ละติจูด": source["lat"],
+                "ลองจิจูด": source["lon"],
+                "รหัสสถานี (WMO)": wmo_id if station_source == "wmo" else f"{wmo_id} → {source['id']}",
                 "แหล่งข้อมูล": thai_source,
                 "source": station_source,
             },
@@ -256,26 +225,17 @@ def fetch_station_with_retry(wmo_id: str, info: Dict[str, Any], start_date, quer
             },
         }
 
-    detail = "; ".join(station_attempt_logs[-3:]) if station_attempt_logs else "no detail"
-    lower_detail = detail.lower()
-    if "timeout" in lower_detail:
-        final_reason = "timeout"
-        thai_detail = "เชื่อมต่อเกินเวลาที่กำหนด (Timeout)"
+    detail = "; ".join(logs[-3:]) if logs else "no detail"
+    if "timeout" in detail.lower():
+        final_reason, thai_detail = "timeout", "เชื่อมต่อเกินเวลาที่กำหนด (Timeout)"
     elif station_reason == "empty":
-        final_reason = "empty"
-        thai_detail = "ช่วงเวลาดังกล่าวไม่มีข้อมูลในฐานข้อมูล"
+        final_reason, thai_detail = "empty", "ช่วงเวลาดังกล่าวไม่มีข้อมูลในฐานข้อมูล"
     else:
-        final_reason = "exception"
-        thai_detail = "เกิดความผิดพลาดในการเชื่อมต่อ API"
+        final_reason, thai_detail = "exception", "เกิดความผิดพลาดในการเชื่อมต่อ API"
 
     return {
         "ok": False,
-        "failed_station": {
-            "wmo_id": wmo_id,
-            "name": info["name"],
-            "reason": final_reason,
-            "detail": detail,
-        },
+        "failed_station": {"wmo_id": wmo_id, "name": info["name"], "reason": final_reason, "detail": detail},
         "station_result": {
             "รหัสสถานี": wmo_id,
             "ชื่อสถานี": info["name"],
@@ -291,6 +251,7 @@ def fetch_stations_parallel(wmo_stations, start_date, query_end_date, progress_b
     fetched_stations = []
     failed_stations = []
     station_results = []
+    results = []
 
     station_items = list(wmo_stations.items())
     total_stations = len(station_items)
@@ -328,14 +289,34 @@ def fetch_stations_parallel(wmo_stations, start_date, query_end_date, progress_b
                     },
                 }
 
-            if result["ok"]:
-                all_weather_data.append(result["weather_df"])
-                fetched_stations.append(result["fetched_station"])
-                station_results.append(result["station_result"])
-            else:
-                failed_stations.append(result["failed_station"])
-                station_results.append(result["station_result"])
-
+            results.append(result)
             progress_bar.progress(completed / total_stations)
+
+    # Primary stations first, so a station's own data wins over another station's fallback copy of it.
+    results.sort(key=lambda r: not (r["ok"] and r["fetched_station"]["source"] == "wmo"))
+    used_sources = set()
+    for result in results:
+        if result["ok"] and result["source_id"] in used_sources:
+            result = {
+                "ok": False,
+                "failed_station": {
+                    "wmo_id": result["station_result"]["รหัสสถานี"],
+                    "name": result["station_result"]["ชื่อสถานี"],
+                    "reason": "duplicate",
+                    "detail": f"fallback {result['source_id']} already counted",
+                },
+                "station_result": {
+                    **result["station_result"],
+                    "สถานะ": "ไม่นับซ้ำ",
+                    "รายละเอียดเพิ่มเติม": f"สถานีสำรอง {result['source_id']} ถูกนับแล้ว จึงไม่นำมาเฉลี่ยซ้ำ",
+                },
+            }
+        if result["ok"]:
+            used_sources.add(result["source_id"])
+            all_weather_data.append(result["weather_df"])
+            fetched_stations.append(result["fetched_station"])
+        else:
+            failed_stations.append(result["failed_station"])
+        station_results.append(result["station_result"])
 
     return all_weather_data, fetched_stations, failed_stations, station_results
