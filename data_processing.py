@@ -39,6 +39,13 @@ def classify_oni(oni_value):
     return "สภาวะเป็นกลาง (Neutral)"
 
 
+def interpolate_short_gaps(col: pd.Series, max_gap: int = INTERPOLATE_LIMIT_DAYS) -> pd.Series:
+    """Linear fill for interior gaps of at most `max_gap` days; longer gaps and the edges stay empty."""
+    filled = col.interpolate(method="linear", limit_area="inside")
+    gap_len = col.isna().groupby(col.notna().cumsum()).transform("sum")
+    return filled.where(col.notna() | (gap_len <= max_gap))
+
+
 def build_monthly_weather_dataframe(all_weather_data: List[pd.DataFrame]) -> pd.DataFrame:
     if not all_weather_data:
         raise ValueError("ไม่มีข้อมูลสถานีที่สามารถนำมารวมได้")
@@ -55,7 +62,8 @@ def build_monthly_weather_dataframe(all_weather_data: List[pd.DataFrame]) -> pd.
     if df_raw.empty:
         raise ValueError("ไม่พบข้อมูลวันที่ที่ถูกต้องหลังจากทำความสะอาด")
 
-    df_raw["prcp"] = pd.to_numeric(df_raw.get("prcp", 0), errors="coerce").fillna(0)
+    # Missing rain stays missing: counting it as 0 mm would pull the averages down.
+    df_raw["prcp"] = pd.to_numeric(df_raw.get("prcp"), errors="coerce")
 
     cols_to_interp = ["temp", "tmin", "tmax", "rhum", "pres", "wspd"]
     for col in cols_to_interp:
@@ -67,9 +75,7 @@ def build_monthly_weather_dataframe(all_weather_data: List[pd.DataFrame]) -> pd.
     # guarantees linear interpolation follows the time axis, and transform keeps
     # the result aligned to the original rows without index gymnastics.
     df_raw = df_raw.sort_values(["wmo_id", "date"])
-    df_raw[cols_to_interp] = df_raw.groupby("wmo_id")[cols_to_interp].transform(
-        lambda col: col.interpolate(method="linear", limit=INTERPOLATE_LIMIT_DAYS)
-    )
+    df_raw[cols_to_interp] = df_raw.groupby("wmo_id")[cols_to_interp].transform(interpolate_short_gaps)
 
     df_daily = df_raw.groupby("date", as_index=False).agg(
         {
@@ -91,13 +97,13 @@ def build_monthly_weather_dataframe(all_weather_data: List[pd.DataFrame]) -> pd.
         rhum_mean=("rhum", "mean"),
         wspd_mean=("wspd", "mean"),
         pres_mean=("pres", "mean"),
-        prcp_sum=("prcp", "sum"),
-        rainy_days=("prcp", lambda x: (x > 0.5).sum()),
+        prcp_sum=("prcp", lambda x: x.sum(min_count=1)),
+        rainy_days=("prcp", lambda x: (x > 0.5).sum() if x.notna().any() else np.nan),
     )
 
-    # Fill residual gaps at the leading/trailing edges of the series so the
-    # exported table is continuous; fully-empty indicators stay NaN by design.
-    df_monthly = df_monthly.bfill().ffill()
+    # Fill only the leading/trailing edges of the series; interior gaps and
+    # fully-empty indicators stay NaN so nothing is guessed in the middle.
+    df_monthly = df_monthly.bfill(limit_area="outside").ffill(limit_area="outside")
     df_monthly["year_month"] = df_monthly["year_month"].astype(str)
     return df_monthly
 

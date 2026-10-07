@@ -31,6 +31,9 @@ def style_bot_fig(fig, *, colorway: bool = False):
         hoverlabel=dict(font=dict(family=BOT_FONT, size=12)),
         margin=dict(l=56, r=24, t=56, b=40),
     )
+    # A title font without title text renders as "undefined" in Plotly 6.
+    if fig.layout.title.text is None:
+        fig.update_layout(title_text="")
     if colorway:
         fig.update_layout(colorway=BOT_COLORWAY)
     fig.update_xaxes(gridcolor=_BOT_GRID, zerolinecolor=_BOT_ZERO, linecolor=_BOT_GRID,
@@ -118,12 +121,15 @@ def render_station_selector(stations: Dict[str, Dict[str, Any]], selected_region
         return station_ids
 
     manual_selection_key = "station_selector_manual_ids"
-    previous_selection = st.session_state.get(manual_selection_key, station_ids)
-    filtered_previous_selection = [station_id for station_id in previous_selection if station_id in station_ids]
-    if not filtered_previous_selection:
-        filtered_previous_selection = station_ids
-
-    st.session_state[manual_selection_key] = filtered_previous_selection
+    previous_selection = st.session_state.get(manual_selection_key)
+    if previous_selection is None:
+        selection = station_ids
+    else:
+        selection = [station_id for station_id in previous_selection if station_id in station_ids]
+        # Emptied by a region change, not by the user clearing it: start from every station again.
+        if previous_selection and not selection:
+            selection = station_ids
+    st.session_state[manual_selection_key] = selection
 
     selected_station_ids = st.multiselect(
         "รายการสถานีที่เลือก",

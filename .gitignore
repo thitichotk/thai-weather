@@ -6,4 +6,3 @@ __pycache__/
 *.pyd
 .vscode/
 .streamlit/secrets.toml
-docs/

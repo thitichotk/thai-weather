@@ -1,6 +1,9 @@
-import ssl
-from datetime import date
+import os
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import certifi
 
 import pandas as pd
 import plotly.express as px
@@ -21,9 +24,19 @@ MIN_STATION_THRESHOLD = 3
 LARGE_SELECTION_HINT = 40
 BASE_DIR = Path(__file__).resolve().parent
 
-# Bypass macOS Python SSL certificate verification issue globally.
-if hasattr(ssl, "_create_unverified_context"):
-    ssl._create_default_https_context = ssl._create_unverified_context
+# Meteostat reads its files through urllib, which on python.org macOS builds has no CA bundle.
+# Point OpenSSL at certifi's bundle instead of switching verification off.
+os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+
+
+def today_bangkok() -> date:
+    return datetime.now(ZoneInfo("Asia/Bangkok")).date()
+
+
+def show_error(message: str, error: Exception):
+    st.error(message)
+    with st.expander("รายละเอียดทางเทคนิค"):
+        st.code(f"{type(error).__name__}: {error}")
 
 
 def validate_date_range(start_date: date, end_date: date):
@@ -31,7 +44,7 @@ def validate_date_range(start_date: date, end_date: date):
         st.error("วันที่เริ่มต้นต้องไม่มากกว่าวันที่สิ้นสุด")
         return False, end_date
 
-    today = date.today()
+    today = today_bangkok()
     if start_date > today:
         st.error("วันที่เริ่มต้นต้องไม่เป็นวันในอนาคต")
         return False, end_date
@@ -60,11 +73,11 @@ def build_station_daily_dataframe(all_weather_data, station_lookup):
 
     df_station["wmo_id"] = df_station["wmo_id"].astype(str)
     df_station["temp"] = pd.to_numeric(df_station.get("temp"), errors="coerce")
-    df_station["prcp"] = pd.to_numeric(df_station.get("prcp", 0), errors="coerce").fillna(0)
+    df_station["prcp"] = pd.to_numeric(df_station.get("prcp"), errors="coerce")
 
     df_station_daily = df_station.groupby(["wmo_id", "date"], as_index=False).agg(
         temp_mean=("temp", "mean"),
-        prcp_sum=("prcp", "sum"),
+        prcp_sum=("prcp", lambda x: x.sum(min_count=1)),
     )
 
     df_station_daily["ชื่อสถานี"] = df_station_daily["wmo_id"].apply(
@@ -89,8 +102,8 @@ def monthly_table_column_config():
     return {
         "year_month": st.column_config.TextColumn("เดือน"),
         "temp_mean": st.column_config.NumberColumn("อุณหภูมิเฉลี่ย (°C)", format="%.1f"),
-        "tmax_max": st.column_config.NumberColumn("อุณหภูมิสูงสุด (°C)", format="%.1f"),
-        "tmin_min": st.column_config.NumberColumn("อุณหภูมิต่ำสุด (°C)", format="%.1f"),
+        "tmax_max": st.column_config.NumberColumn("สูงสุดของ Tmax เฉลี่ย (°C)", format="%.1f"),
+        "tmin_min": st.column_config.NumberColumn("ต่ำสุดของ Tmin เฉลี่ย (°C)", format="%.1f"),
         "rhum_mean": st.column_config.NumberColumn("ความชื้น (%)", format="%.0f"),
         "wspd_mean": st.column_config.NumberColumn("ความเร็วลม (km/h)", format="%.1f"),
         "pres_mean": st.column_config.NumberColumn("ความกดอากาศ (hPa)", format="%.1f"),
@@ -103,11 +116,11 @@ def monthly_table_column_config():
 
 # --- App setup ---
 st.set_page_config(
-    page_title="Thailand Meteorological Analyzer",
+    page_title="Thai-Weather · ระบบรวบรวมและวิเคราะห์ข้อมูลอุตุนิยมวิทยา",
     page_icon=":material/cloud:",
     layout="wide",
     menu_items={
-        "about": "ระบบรวบรวมและวิเคราะห์ข้อมูลอุตุนิยมวิทยาประเทศไทย • ข้อมูลจาก Meteostat และ NOAA "
+        "about": "Thai-Weather: ระบบรวบรวมและวิเคราะห์ข้อมูลอุตุนิยมวิทยาประเทศไทย • ข้อมูลจาก Meteostat และ NOAA "
         "• โครงการนี้ไม่ใช่เว็บไซต์อย่างเป็นทางการของหน่วยงานรัฐ",
     },
 )
@@ -148,7 +161,7 @@ st.divider()
 try:
     all_stations = load_stations()
 except Exception as e:
-    st.error(f"เกิดข้อผิดพลาดในการโหลดข้อมูลสถานี: {e}")
+    show_error("โหลดรายชื่อสถานีไม่สำเร็จ ตรวจสอบว่ามีไฟล์ stations.json ที่ถูกต้องอยู่ในโฟลเดอร์ของแอป", e)
     st.stop()
 
 # --- User inputs ---
@@ -165,12 +178,13 @@ with st.container():
     with col1:
         start_date = st.date_input(
             "วันที่เริ่มต้น",
-            value=date(2005, 1, 1),
+            # Five years by default: all 127 stations since 2005 was enough data to freeze the browser.
+            value=date(today_bangkok().year - 5, 1, 1),
             min_value=date(1950, 1, 1),
-            max_value=date.today(),
+            max_value=today_bangkok(),
         )
     with col2:
-        end_date = st.date_input("วันที่สิ้นสุด", date.today())
+        end_date = st.date_input("วันที่สิ้นสุด", today_bangkok())
 
 stations_in_selected_regions = {k: v for k, v in all_stations.items() if v["region"] in selected_regions}
 wmo_stations = {k: v for k, v in stations_in_selected_regions.items() if k in selected_station_ids}
@@ -222,12 +236,14 @@ if st.button("ประมวลผลและทำความสะอาด
     timeout_count = sum(1 for x in failed_stations if x["reason"] == "timeout")
     empty_count = sum(1 for x in failed_stations if x["reason"] == "empty")
     exception_count = sum(1 for x in failed_stations if x["reason"] == "exception")
+    duplicate_count = sum(1 for x in failed_stations if x["reason"] == "duplicate")
     fallback_success_count = sum(1 for x in fetched_stations if x.get("source") == "fallback")
 
     st.info(
         f"สรุปผลการสืบค้นข้อมูลสถานี: สำเร็จ {success_count}/{total_stations} แห่ง | "
         f"เรียกข้อมูลสำรอง (Fallback) สำเร็จ {fallback_success_count} แห่ง | "
         f"ไม่มีข้อมูล {empty_count} | หมดเวลา (Timeout) {timeout_count} | ข้อผิดพลาดอื่น {exception_count}"
+        + (f" | สถานีสำรองซ้ำ (ไม่นับซ้ำ) {duplicate_count}" if duplicate_count else "")
     )
 
     with st.expander("รายละเอียดบันทึกการสืบค้นข้อมูลรายสถานี"):
@@ -239,14 +255,16 @@ if st.button("ประมวลผลและทำความสะอาด
         except Exception as e:
             progress_bar.empty()
             status_text.empty()
-            st.error(f"เกิดข้อผิดพลาดระหว่างเตรียมข้อมูลสภาพอากาศ: {e}")
+            show_error("เตรียมข้อมูลสภาพอากาศไม่สำเร็จ ลองลดจำนวนสถานีหรือช่วงวันที่ แล้วกดประมวลผลอีกครั้ง", e)
             st.stop()
 
         try:
             df_oni = fetch_oni_data()
             df_monthly = merge_oni_labels(df_monthly, df_oni)
         except Exception as e:
-            st.warning(f"ไม่สามารถดึงข้อมูล ONI ได้ในขณะนี้: {e}")
+            st.warning("ดึงข้อมูล ONI จาก NOAA ไม่ได้ในขณะนี้ ผลลัพธ์จึงไม่มีคอลัมน์ ONI ลองใหม่ภายหลัง")
+            with st.expander("รายละเอียดทางเทคนิค"):
+                st.code(f"{type(e).__name__}: {e}")
 
         status_text.markdown("เสร็จสิ้นกระบวนการ!")
         progress_bar.empty()
@@ -318,8 +336,6 @@ if st.button("ประมวลผลและทำความสะอาด
             )
             try:
                 has_oni = "ONI_Index" in df_monthly.columns
-                if has_oni and "ONI_Label" not in df_monthly.columns:
-                    df_monthly["ONI_Label"] = "ไม่สามารถจัดประเภทได้"
 
                 panel_titles = ["ปริมาณฝนรวม (mm)", "อุณหภูมิเฉลี่ย (°C)"]
                 if has_oni:
@@ -395,7 +411,7 @@ if st.button("ประมวลผลและทำความสะอาด
 
                 st.plotly_chart(fig, width="stretch")
             except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการวาดกราฟ: {e}")
+                show_error("วาดกราฟไม่สำเร็จ ตารางด้านล่างยังใช้งานได้", e)
 
             st.markdown("#### ตารางสรุปผลข้อมูลรายเดือน")
             st.dataframe(
@@ -418,6 +434,7 @@ if st.button("ประมวลผลและทำความสะอาด
                     y="temp_mean",
                     color="station_label",
                     hover_name="ชื่อสถานี",
+                    render_mode="webgl",
                     labels={
                         "date": "วันที่",
                         "temp_mean": "อุณหภูมิเฉลี่ย (°C)",
@@ -435,6 +452,7 @@ if st.button("ประมวลผลและทำความสะอาด
                     y="prcp_sum",
                     color="station_label",
                     hover_name="ชื่อสถานี",
+                    render_mode="webgl",
                     labels={
                         "date": "วันที่",
                         "prcp_sum": "ปริมาณฝน (mm)",
@@ -509,6 +527,7 @@ if st.button("ประมวลผลและทำความสะอาด
                     data=csv_data,
                     file_name=f"thailand_weather_monthly_with_oni_{start_date.year}_to_{end_date.year}.csv",
                     mime="text/csv",
+                    on_click="ignore",  # a rerun here would wipe the results
                     type="primary",
                     width="stretch",
                 )
@@ -520,6 +539,7 @@ if st.button("ประมวลผลและทำความสะอาด
                     data=excel_data,
                     file_name=f"thailand_weather_monthly_with_oni_{start_date.year}_to_{end_date.year}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    on_click="ignore",
                     type="primary",
                     width="stretch",
                 )
@@ -532,12 +552,12 @@ if st.button("ประมวลผลและทำความสะอาด
 | --- | --- | --- |
 | **year_month** | ปีและเดือนของข้อมูล | YYYY-MM |
 | **temp_mean** | อุณหภูมิเฉลี่ยประจำเดือน | องศาเซลเซียส (°C) |
-| **tmax_max** | อุณหภูมิสูงสุดที่บันทึกได้ในเดือนนั้น | องศาเซลเซียส (°C) |
-| **tmin_min** | อุณหภูมิต่ำสุดที่บันทึกได้ในเดือนนั้น | องศาเซลเซียส (°C) |
+| **tmax_max** | ค่าสูงสุดในเดือนของอุณหภูมิสูงสุดรายวัน (เฉลี่ยทุกสถานีที่เลือก) | องศาเซลเซียส (°C) |
+| **tmin_min** | ค่าต่ำสุดในเดือนของอุณหภูมิต่ำสุดรายวัน (เฉลี่ยทุกสถานีที่เลือก) | องศาเซลเซียส (°C) |
 | **rhum_mean** | ความชื้นสัมพัทธ์เฉลี่ย | เปอร์เซ็นต์ (%) |
 | **wspd_mean** | ความเร็วลมเฉลี่ย | กิโลเมตรต่อชั่วโมง (km/h) |
 | **pres_mean** | ความกดอากาศเฉลี่ยที่ระดับน้ำทะเล | เฮกโตปาสคาล (hPa) |
-| **prcp_sum** | ปริมาณน้ำฝนสะสมรวมในเดือนนั้น | มิลลิเมตร (mm) |
+| **prcp_sum** | ปริมาณน้ำฝนสะสมรวมในเดือนนั้น (ค่าเฉลี่ยรายวันของทุกสถานีที่มีข้อมูล รวมทั้งเดือน) | มิลลิเมตร (mm) |
 | **rainy_days** | จำนวนวันที่ฝนตก (ปริมาณฝน > 0.5 mm) | วัน (days) |
 | **ONI_Index** | ดัชนี Oceanic Niño Index ชี้วัดความรุนแรงปรากฏการณ์เอลนีโญ/ลานีญา | - |
 | **ONI_Label** | ผลการจัดประเภทความรุนแรงเอลนีโญ/ลานีญาจากค่า ONI | - |
