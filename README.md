@@ -1,20 +1,12 @@
 # Thai-Weather
 
-[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Streamlit](https://img.shields.io/badge/Streamlit-1.56.0-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
-[![Meteostat](https://img.shields.io/badge/Meteostat-2.1.4-0055A4)](https://dev.meteostat.net/python/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-
-**Live app: [thaiweather.streamlit.app](https://thaiweather.streamlit.app)**
+**Live: [thaiweather.streamlit.app](https://thaiweather.streamlit.app)** (Thai interface)
 
 Thai-Weather (ระบบรวบรวมและวิเคราะห์ข้อมูลอุตุนิยมวิทยา) collects daily observations from 127 Thai weather
 stations, cleans them, and charts them by month next to NOAA's **Oceanic Niño Index (ONI)**, so you can see how
-rain and temperature moved through El Niño and La Niña years. The interface is in Thai.
+rain and temperature moved through El Niño and La Niña years.
 
 ![Monthly rain, temperature and ONI for the Central and Eastern regions](assets/screenshot.png)
-
-> An independent project, not an official website of any government agency. The TMD and NOAA logos only credit
-> where the data comes from.
 
 ## What it does
 
@@ -32,21 +24,19 @@ rain and temperature moved through El Niño and La Niña years. The interface is
 
 ## Run it locally
 
-Needs **Python 3.11+** (pandas 3).
+Needs Python 3.11+ (pandas 3).
 
 ```bash
+git clone https://github.com/thitichotk/thai-weather.git
+cd thai-weather
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-streamlit run app.py          # http://localhost:8501
+streamlit run app.py              # http://localhost:8501
+pip install pytest && python -m pytest tests   # the cleaning rules
 ```
 
-Tests for the cleaning rules:
-
-```bash
-pip install pytest
-python -m pytest tests
-```
+Streamlit Community Cloud redeploys the app from `main`.
 
 ## How it works
 
@@ -60,7 +50,7 @@ flowchart LR
     F --> G[Charts, map, CSV / Excel]
 ```
 
-| File | Role |
+| Path | Role |
 |---|---|
 | `app.py` | Streamlit page: inputs, results, charts, exports |
 | `weather_fetcher.py` | Station list, Meteostat fetch with retry and fallback, NOAA ONI scrape |
@@ -69,6 +59,8 @@ flowchart LR
 | `stations.json` | 127 stations keyed by WMO ID: `name`, `address`, `lat`, `lon`, `region` |
 | `.streamlit/` | Theme (`config.toml`) and styling (`style.css`) |
 | `tests/` | Checks for the gap-filling and rain rules |
+
+Built with Streamlit 1.56, pandas 3, Plotly 6 and the Meteostat 2.1.4 Python library.
 
 ### Monthly output columns
 
@@ -100,12 +92,6 @@ flowchart LR
 | -1.9 to -1.5 | La Niña, strong |
 | -2.0 or less | La Niña, very strong |
 
-## Data sources
-
-- **Weather:** [Meteostat](https://dev.meteostat.net/) ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)),
-  which publishes observations from Thai Meteorological Department stations among others.
-- **ONI:** [NOAA Climate Prediction Center](https://www.cpc.ncep.noaa.gov/products/analysis_monitoring/enso/oni/v6/) (ERSSTv6).
-
 ## Troubleshooting
 
 - **`certificate verify failed` on macOS:** the app already points OpenSSL at `certifi`'s bundle. If you run the
@@ -115,6 +101,14 @@ flowchart LR
 - **Slow or failing fetches:** pick fewer stations or a shorter range. The per-station log on the results page
   says why each station failed.
 
-## License
+## Credits and licence
+
+- **Weather:** [Meteostat](https://dev.meteostat.net/) ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)),
+  which publishes observations from Thai Meteorological Department stations among others.
+- **ONI:** [NOAA Climate Prediction Center](https://www.cpc.ncep.noaa.gov/products/analysis_monitoring/enso/oni/v6/) (ERSSTv6).
 
 [MIT](LICENSE) © 2026 Thitichot K.
+
+An independent project, not an official website of any government agency, and not affiliated with the Thai
+Meteorological Department, NOAA or the Bank of Thailand. The TMD and NOAA logos only credit where the data comes from,
+and the styling follows the Bank of Thailand's design system.
